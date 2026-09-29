@@ -1,0 +1,32 @@
+@"
+# Secrets / environment files
+.env
+.env.*
+!.env.example
+
+# Local MiniLB configs containing tokens
+minilb.cloud.yml
+minilb.*.local.yml
+
+# AWS SAM local/deployment config
+samconfig.toml
+
+# AWS SAM build artifacts
+.aws-sam/
+
+# Rust
+target/
+
+# Node / React
+node_modules/
+dist/
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+"@ | Set-Content .gitignore

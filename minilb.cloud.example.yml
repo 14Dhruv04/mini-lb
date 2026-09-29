@@ -1,0 +1,20 @@
+listen: "0.0.0.0:8080"
+admin_listen: "0.0.0.0:9090"
+health_check_interval_seconds: 5
+health_check_path: "/health"
+
+# When control_plane is configured, MiniLB polls the AWS control plane and
+# applies newer versions automatically. The local file remains the bootstrap
+# configuration, so MiniLB can start even when AWS is temporarily unavailable.
+control_plane:
+  url: "https://YOUR_API_ID.execute-api.YOUR_REGION.amazonaws.com/instances/YOUR_INSTANCE_ID/config"
+  token: "YOUR_INSTANCE_TOKEN"
+  poll_interval_seconds: 10
+
+backends:
+  - id: "backend-a"
+    url: "http://backend-a:8001"
+    enabled: true
+  - id: "backend-b"
+    url: "http://backend-b:8002"
+    enabled: true

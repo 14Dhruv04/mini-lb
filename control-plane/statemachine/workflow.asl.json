@@ -1,0 +1,55 @@
+{
+  "Comment": "Validate, snapshot, and safely activate a MiniLB configuration",
+  "StartAt": "ValidateConfig",
+  "States": {
+    "ValidateConfig": {
+      "Type": "Task",
+      "Resource": "${ValidateConfigArn}",
+      "Retry": [
+        {
+          "ErrorEquals": ["States.TaskFailed", "Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException"],
+          "IntervalSeconds": 2,
+          "BackoffRate": 2.0,
+          "MaxAttempts": 3
+        }
+      ],
+      "Next": "SnapshotConfig"
+    },
+    "SnapshotConfig": {
+      "Type": "Task",
+      "Resource": "${SnapshotConfigArn}",
+      "Retry": [
+        {
+          "ErrorEquals": ["States.TaskFailed", "Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException"],
+          "IntervalSeconds": 2,
+          "BackoffRate": 2.0,
+          "MaxAttempts": 3
+        }
+      ],
+      "Next": "ActivateConfig"
+    },
+    "ActivateConfig": {
+      "Type": "Task",
+      "Resource": "${ActivateConfigArn}",
+      "Retry": [
+        {
+          "ErrorEquals": ["States.TaskFailed", "Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException"],
+          "IntervalSeconds": 2,
+          "BackoffRate": 2.0,
+          "MaxAttempts": 3
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "Next": "ActivationFailed"
+        }
+      ],
+      "End": true
+    },
+    "ActivationFailed": {
+      "Type": "Fail",
+      "Cause": "Configuration could not be activated because the active version changed or the persistence step failed."
+    }
+  }
+}

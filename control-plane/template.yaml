@@ -1,0 +1,253 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: MiniLB control plane - API Gateway + Lambda + DynamoDB + Step Functions + S3 + OpenSearch Serverless
+
+Parameters:
+  AdminToken:
+    Type: String
+    NoEcho: true
+    MinLength: 16
+    Description: MVP admin token for management API routes.
+
+Globals:
+  Function:
+    Runtime: python3.13
+    Timeout: 10
+    MemorySize: 256
+    Environment:
+      Variables:
+        TABLE_NAME: !Ref MiniLBTable
+        ADMIN_TOKEN: !Ref AdminToken
+        CONFIG_BUCKET: !Ref MiniLBConfigBucket
+
+Resources:
+  MiniLBTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: instanceId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: instanceId
+          KeyType: HASH
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+
+  MiniLBConfigBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      VersioningConfiguration:
+        Status: Enabled
+
+  ValidateConfigFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: workflow.validate
+
+  SnapshotConfigFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: workflow.snapshot
+      Policies:
+        - S3WritePolicy:
+            BucketName: !Ref MiniLBConfigBucket
+
+  ActivateConfigFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: workflow.activate
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref MiniLBTable
+
+  MiniLBStateMachine:
+    Type: AWS::Serverless::StateMachine
+    Properties:
+      DefinitionUri: statemachine/workflow.asl.json
+      DefinitionSubstitutions:
+        ValidateConfigArn: !GetAtt ValidateConfigFunction.Arn
+        SnapshotConfigArn: !GetAtt SnapshotConfigFunction.Arn
+        ActivateConfigArn: !GetAtt ActivateConfigFunction.Arn
+      Policies:
+        - LambdaInvokePolicy:
+            FunctionName: !Ref ValidateConfigFunction
+        - LambdaInvokePolicy:
+            FunctionName: !Ref SnapshotConfigFunction
+        - LambdaInvokePolicy:
+            FunctionName: !Ref ActivateConfigFunction
+
+  MiniLBLogsEncryptionPolicy:
+    Type: AWS::OpenSearchServerless::SecurityPolicy
+    Properties:
+      Name: minilb-logs-encryption
+      Type: encryption
+      Description: Encryption policy for MiniLB telemetry collection.
+      Policy: >-
+        {"Rules":[{"ResourceType":"collection","Resource":["collection/minilb-logs"]}],"AWSOwnedKey":true}
+
+  MiniLBLogsNetworkPolicy:
+    Type: AWS::OpenSearchServerless::SecurityPolicy
+    Properties:
+      Name: minilb-logs-network
+      Type: network
+      Description: Public network endpoint for MiniLB telemetry; data access remains IAM controlled.
+      Policy: >-
+        [{"Rules":[{"ResourceType":"collection","Resource":["collection/minilb-logs"]}],"AllowFromPublic":true}]
+
+  MiniLBLogsCollectionGroup:
+    Type: AWS::OpenSearchServerless::CollectionGroup
+    Properties:
+      Name: minilb-logs-group
+      Generation: NEXTGEN
+      StandbyReplicas: ENABLED
+      CapacityLimits:
+        MinIndexingCapacityInOcu: 2
+        MaxIndexingCapacityInOcu: 2
+        MinSearchCapacityInOcu: 2
+        MaxSearchCapacityInOcu: 2
+      Description: Cost-bounded MiniLB observability collection group.
+
+  MiniLBLogsCollection:
+    Type: AWS::OpenSearchServerless::Collection
+    Properties:
+      Name: minilb-logs
+      Type: SEARCH
+      CollectionGroupName: minilb-logs-group
+      StandbyReplicas: ENABLED
+      Description: MiniLB request and backend health telemetry.
+    DependsOn:
+      - MiniLBLogsEncryptionPolicy
+      - MiniLBLogsNetworkPolicy
+      - MiniLBLogsCollectionGroup
+
+  MiniLBFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: MiniLBControlPlaneAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:Scan
+                Resource: !GetAtt MiniLBTable.Arn
+              - Effect: Allow
+                Action:
+                  - states:StartExecution
+                Resource: !Ref MiniLBStateMachine
+              - Effect: Allow
+                Action:
+                  - aoss:APIAccessAll
+                Resource: !Sub 'arn:${AWS::Partition}:aoss:${AWS::Region}:${AWS::AccountId}:collection/*'
+
+  MiniLBLogsDataAccessPolicy:
+    Type: AWS::OpenSearchServerless::AccessPolicy
+    Properties:
+      Name: minilb-logs-data
+      Type: data
+      Description: Data access for the MiniLB control-plane Lambda.
+      Policy: !Sub >-
+        [{"Rules":[{"ResourceType":"index","Resource":["index/minilb-logs/*"],"Permission":["aoss:CreateIndex","aoss:DescribeIndex","aoss:ReadDocument","aoss:WriteDocument","aoss:UpdateIndex"]}],"Principal":["${MiniLBFunctionRole.Arn}"]}]
+
+  MiniLBFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: app.lambda_handler
+      Role: !GetAtt MiniLBFunctionRole.Arn
+      Environment:
+        Variables:
+          STATE_MACHINE_ARN: !Ref MiniLBStateMachine
+          OPENSEARCH_ENDPOINT: !GetAtt MiniLBLogsCollection.CollectionEndpoint
+          OPENSEARCH_INDEX: minilb-events
+      Events:
+        CreateInstance:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref MiniLBApi
+            Path: /instances
+            Method: POST
+        ListInstances:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref MiniLBApi
+            Path: /instances
+            Method: GET
+        GetInstance:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref MiniLBApi
+            Path: /instances/{instanceId}
+            Method: GET
+        GetConfig:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref MiniLBApi
+            Path: /instances/{instanceId}/config
+            Method: GET
+        PutConfig:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref MiniLBApi
+            Path: /instances/{instanceId}/config
+            Method: PUT
+        PostEvent:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref MiniLBApi
+            Path: /instances/{instanceId}/events
+            Method: POST
+        GetEvents:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref MiniLBApi
+            Path: /instances/{instanceId}/events
+            Method: GET
+
+  MiniLBApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      CorsConfiguration:
+        AllowOrigins:
+          - '*'
+        AllowHeaders:
+          - content-type
+          - x-admin-token
+          - x-minilb-token
+        AllowMethods:
+          - GET
+          - POST
+          - PUT
+          - OPTIONS
+
+Outputs:
+  ApiUrl:
+    Description: MiniLB control plane HTTP API
+    Value: !Sub 'https://${MiniLBApi}.execute-api.${AWS::Region}.amazonaws.com'
+  TableName:
+    Value: !Ref MiniLBTable
+  ConfigBucketName:
+    Value: !Ref MiniLBConfigBucket
+  StateMachineArn:
+    Value: !Ref MiniLBStateMachine
+  OpenSearchEndpoint:
+    Value: !GetAtt MiniLBLogsCollection.CollectionEndpoint
+  OpenSearchCollectionArn:
+    Value: !GetAtt MiniLBLogsCollection.Arn

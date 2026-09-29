@@ -1,0 +1,11 @@
+listen: "0.0.0.0:8080"
+admin_listen: "0.0.0.0:9090"
+health_check_interval_seconds: 2
+health_check_path: "/health"
+backends:
+  - id: "backend-a"
+    url: "http://backend-a:8001"
+    enabled: true
+  - id: "backend-b"
+    url: "http://backend-b:8002"
+    enabled: true

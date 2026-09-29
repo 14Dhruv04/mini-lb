@@ -1,0 +1,3 @@
+[workspace]
+members = ["minilb", "demo-backend"]
+resolver = "2"
